@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { RuntimeDependencyStatus } from "../types";
 
 function checkCommand(command: string): Promise<boolean> {
@@ -12,7 +14,8 @@ function checkCommand(command: string): Promise<boolean> {
 }
 
 export async function getRuntimeDependencyStatus(): Promise<RuntimeDependencyStatus> {
-  const ytDlpAvailable = await checkCommand("yt-dlp");
-  const ffmpegAvailable = await checkCommand("ffmpeg");
+  const binDir = join(process.cwd(), "bin");
+  const ytDlpAvailable = existsSync(join(binDir, "yt-dlp.exe")) || await checkCommand("yt-dlp");
+  const ffmpegAvailable = existsSync(join(binDir, "ffmpeg.exe")) || await checkCommand("ffmpeg");
   return { ytDlpAvailable, ffmpegAvailable };
 }

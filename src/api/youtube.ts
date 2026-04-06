@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { getOptionalEnv } from "../config/env";
 import { SourceTrack } from "../types";
 
@@ -12,9 +14,11 @@ export interface YouTubeCandidate {
 function resolveYtDlp(): string {
   const env = getOptionalEnv();
   if (env.ytDlpPath) {
-    const p = env.ytDlpPath.replace(/[\\/]$/, "");
+    const p = env.ytDlpPath.replace(/[\/]$/, "");
     return p.endsWith("yt-dlp") || p.endsWith("yt-dlp.exe") ? p : `${p}\\yt-dlp`;
   }
+  const binExe = join(process.cwd(), "bin", "yt-dlp.exe");
+  if (existsSync(binExe)) return binExe;
   return "yt-dlp";
 }
 

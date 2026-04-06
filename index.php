@@ -105,29 +105,43 @@ function getSetupStatus(): array
     ];
 
     // 4. yt-dlp reachable
+    $binDir = __DIR__ . DIRECTORY_SEPARATOR . "bin";
+    $ytdlpBin = $binDir . DIRECTORY_SEPARATOR . "yt-dlp.exe";
     $ytdlpPath = $envValues["YT_DLP_PATH"] ?? "";
     $ytdlpOk = false;
-    if ($ytdlpPath !== "") {
+    if (file_exists($ytdlpBin)) {
+        $ytdlpOk = true;
+    } elseif ($ytdlpPath !== "") {
         $ytdlpExe = rtrim($ytdlpPath, "\\/") . DIRECTORY_SEPARATOR . "yt-dlp.exe";
         $ytdlpOk = file_exists($ytdlpExe);
         if (!$ytdlpOk) {
-            // maybe the path IS the exe
             $ytdlpOk = file_exists($ytdlpPath) && str_ends_with(strtolower($ytdlpPath), "yt-dlp.exe");
         }
     }
-    $checks["ytdlp"] = ["ok" => $ytdlpOk, "detail" => $ytdlpOk ? "found" : ($ytdlpPath === "" ? "path not set" : "not found at " . $ytdlpPath)];
+    $checks["ytdlp"] = [
+        "ok" => $ytdlpOk,
+        "inBin" => file_exists($ytdlpBin),
+        "detail" => $ytdlpOk ? (file_exists($ytdlpBin) ? "in bin/" : "found") : "not found",
+    ];
 
     // 5. ffmpeg reachable
+    $ffmpegBin = $binDir . DIRECTORY_SEPARATOR . "ffmpeg.exe";
     $ffmpegPath = $envValues["FFMPEG_PATH"] ?? "";
     $ffmpegOk = false;
-    if ($ffmpegPath !== "") {
+    if (file_exists($ffmpegBin)) {
+        $ffmpegOk = true;
+    } elseif ($ffmpegPath !== "") {
         $ffmpegExe = rtrim($ffmpegPath, "\\/") . DIRECTORY_SEPARATOR . "ffmpeg.exe";
         $ffmpegOk = file_exists($ffmpegExe);
         if (!$ffmpegOk) {
             $ffmpegOk = file_exists($ffmpegPath) && str_ends_with(strtolower($ffmpegPath), "ffmpeg.exe");
         }
     }
-    $checks["ffmpeg"] = ["ok" => $ffmpegOk, "detail" => $ffmpegOk ? "found" : ($ffmpegPath === "" ? "path not set" : "not found at " . $ffmpegPath)];
+    $checks["ffmpeg"] = [
+        "ok" => $ffmpegOk,
+        "inBin" => file_exists($ffmpegBin),
+        "detail" => $ffmpegOk ? (file_exists($ffmpegBin) ? "in bin/" : "found") : "not found",
+    ];
 
     // 6. TypeScript built
     $hasDist = file_exists($projectDir . DIRECTORY_SEPARATOR . "dist" . DIRECTORY_SEPARATOR . "cli" . DIRECTORY_SEPARATOR . "index.js");
@@ -155,6 +169,18 @@ $setupError = "";
 
 if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST["action"] ?? "") === "setup_save_env") {
     $envPath = __DIR__ . DIRECTORY_SEPARATOR . ".env";
+    // Read existing env to preserve tool paths if already set
+    $existingEnv = [];
+    if (file_exists($envPath)) {
+        foreach (file($envPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+            $line = trim($line);
+            if ($line === "" || str_starts_with($line, "#")) continue;
+            $eqPos = strpos($line, "=");
+            if ($eqPos !== false) {
+                $existingEnv[trim(substr($line, 0, $eqPos))] = trim(substr($line, $eqPos + 1));
+            }
+        }
+    }
     $envLines = [];
     $envLines[] = "TIDAL_ACCESS_TOKEN=";
     $envLines[] = "TIDAL_CLIENT_ID=" . trim((string)($_POST["tidal_client_id"] ?? ""));
@@ -163,12 +189,35 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST["action"] ?? "") === "setup
     $envLines[] = "TIDAL_COUNTRY_CODE=" . (trim((string)($_POST["tidal_country_code"] ?? "")) ?: "US");
     $envLines[] = "TIDAL_API_BASE_URL=https://openapi.tidal.com/v2";
     $envLines[] = "OUTPUT_DIR=./downloads";
-    $envLines[] = "YT_DLP_PATH=" . trim((string)($_POST["ytdlp_path"] ?? ""));
-    $envLines[] = "FFMPEG_PATH=" . trim((string)($_POST["ffmpeg_path"] ?? ""));
+    $envLines[] = "YT_DLP_PATH=" . ($existingEnv["YT_DLP_PATH"] ?? "");
+    $envLines[] = "FFMPEG_PATH=" . ($existingEnv["FFMPEG_PATH"] ?? "");
     $envLines[] = "LOG_LEVEL=info";
 
     file_put_contents($envPath, implode("\n", $envLines) . "\n");
     $setupMessage = "Environment file saved.";
+}
+
+if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST["action"] ?? "") === "setup_save_tool_paths") {
+    $envPath = __DIR__ . DIRECTORY_SEPARATOR . ".env";
+    $existingEnv = [];
+    if (file_exists($envPath)) {
+        foreach (file($envPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+            $line = trim($line);
+            if ($line === "" || str_starts_with($line, "#")) continue;
+            $eqPos = strpos($line, "=");
+            if ($eqPos !== false) {
+                $existingEnv[trim(substr($line, 0, $eqPos))] = trim(substr($line, $eqPos + 1));
+            }
+        }
+    }
+    $existingEnv["YT_DLP_PATH"] = trim((string)($_POST["ytdlp_path"] ?? ""));
+    $existingEnv["FFMPEG_PATH"] = trim((string)($_POST["ffmpeg_path"] ?? ""));
+    $out = "";
+    foreach ($existingEnv as $k => $v) {
+        $out .= $k . "=" . $v . "\n";
+    }
+    file_put_contents($envPath, $out);
+    $setupMessage = "Tool paths saved.";
 }
 
 if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST["action"] ?? "") === "setup_install") {
@@ -206,6 +255,64 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST["action"] ?? "") === "setup
             $setupError = "Consent command failed: " . substr($r["output"], 0, 500);
         }
     } catch (Throwable $e) {
+        $setupError = $e->getMessage();
+    }
+}
+
+if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST["action"] ?? "") === "setup_download_ytdlp") {
+    $binDir = __DIR__ . DIRECTORY_SEPARATOR . "bin";
+    if (!is_dir($binDir)) {
+        mkdir($binDir, 0755, true);
+    }
+    $outPath = $binDir . DIRECTORY_SEPARATOR . "yt-dlp.exe";
+    $url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+    try {
+        $r = runCommand("curl.exe -L --max-time 120 --retry 2 -o \"" . $outPath . "\" \"" . $url . "\" 2>&1", __DIR__);
+        if ($r["exitCode"] === 0 && file_exists($outPath) && filesize($outPath) > 0) {
+            $setupMessage = "yt-dlp downloaded successfully.";
+        } else {
+            $setupError = "Failed to download yt-dlp: " . substr($r["output"], 0, 500);
+        }
+    } catch (Throwable $e) {
+        $setupError = $e->getMessage();
+    }
+}
+
+if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST["action"] ?? "") === "setup_download_ffmpeg") {
+    $binDir = __DIR__ . DIRECTORY_SEPARATOR . "bin";
+    if (!is_dir($binDir)) {
+        mkdir($binDir, 0755, true);
+    }
+    $tempZip     = $binDir . DIRECTORY_SEPARATOR . "ffmpeg-temp.zip";
+    $tempExtract = $binDir . DIRECTORY_SEPARATOR . "ffmpeg-extract";
+    $outPath     = $binDir . DIRECTORY_SEPARATOR . "ffmpeg.exe";
+    $url         = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+    $psLines = [
+        '$ErrorActionPreference = "Stop"',
+        'Write-Host "Downloading FFmpeg..."',
+        'curl.exe -L --max-time 300 --retry 2 -o "' . $tempZip . '" "' . $url . '"',
+        'if ($LASTEXITCODE -ne 0) { throw "curl download failed with exit code $LASTEXITCODE" }',
+        'Write-Host "Extracting..."',
+        'Expand-Archive -Path "' . $tempZip . '" -DestinationPath "' . $tempExtract . '" -Force',
+        '$exe = Get-ChildItem -Path "' . $tempExtract . '" -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1 -ExpandProperty FullName',
+        'if (-not $exe) { throw "ffmpeg.exe not found in archive" }',
+        'Copy-Item $exe -Destination "' . $outPath . '" -Force',
+        'Remove-Item -Recurse -Force "' . $tempExtract . '", "' . $tempZip . '"',
+        'Write-Host "Done."',
+    ];
+    $psScript = implode("\r\n", $psLines);
+    $psFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . "musicer_ffmpeg_" . bin2hex(random_bytes(4)) . ".ps1";
+    file_put_contents($psFile, $psScript);
+    try {
+        $r = runCommand("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" . $psFile . "\" 2>&1", __DIR__);
+        @unlink($psFile);
+        if ($r["exitCode"] === 0 && file_exists($outPath) && filesize($outPath) > 0) {
+            $setupMessage = "FFmpeg downloaded successfully.";
+        } else {
+            $setupError = "Failed to download FFmpeg: " . substr($r["output"], 0, 600);
+        }
+    } catch (Throwable $e) {
+        @unlink($psFile);
         $setupError = $e->getMessage();
     }
 }
@@ -904,13 +1011,13 @@ if (is_dir($downloadsDir)) {
           <span class="step-badge <?php echo $ch['env']['ok'] ? 'badge-ok' : 'badge-pending'; ?>"><?php echo $ch['env']['ok'] ? '✓' : '3'; ?></span>
           Configuration
         </h2>
-        <?php if ($ch["env"]["ok"] && $ch["ytdlp"]["ok"] && $ch["ffmpeg"]["ok"]): ?>
-          <p>All environment settings are configured.</p>
+        <?php if ($ch["env"]["ok"]): ?>
+          <p>TIDAL credentials are configured.</p>
         <?php else: ?>
           <p>
-            Configure your API credentials and tool paths. You'll need a
+            Enter your TIDAL API credentials. You'll need a free
             <a href="https://developer.tidal.com/" target="_blank" rel="noopener" style="color:var(--accent)">TIDAL Developer</a>
-            account (free) to get API credentials.
+            account to get them.
           </p>
           <?php $ev = $ch["env"]["values"] ?? []; ?>
           <form method="post">
@@ -928,31 +1035,85 @@ if (is_dir($downloadsDir)) {
               <input id="s_cc" name="tidal_country_code" value="<?php echo h($ev['TIDAL_COUNTRY_CODE'] ?? 'US'); ?>" placeholder="US" style="max-width:120px">
               <p class="hint">Two-letter country code for TIDAL catalog (default: US)</p>
             </div>
-            <div class="field-row">
-              <label for="s_yt">yt-dlp Path <span style="color:var(--danger)">*</span></label>
-              <input id="s_yt" name="ytdlp_path" value="<?php echo h($ev['YT_DLP_PATH'] ?? ''); ?>" placeholder="C:\ytdlp\">
-              <p class="hint">
-                Folder containing <code>yt-dlp.exe</code>. Download from
-                <a href="https://github.com/yt-dlp/yt-dlp/releases" target="_blank" rel="noopener" style="color:var(--accent)">yt-dlp releases</a>.
-              </p>
-            </div>
-            <div class="field-row">
-              <label for="s_ff">FFmpeg Path <span style="color:var(--danger)">*</span></label>
-              <input id="s_ff" name="ffmpeg_path" value="<?php echo h($ev['FFMPEG_PATH'] ?? ''); ?>" placeholder="C:\ffmpeg\bin\">
-              <p class="hint">
-                Folder containing <code>ffmpeg.exe</code>. Download from
-                <a href="https://ffmpeg.org/download.html" target="_blank" rel="noopener" style="color:var(--accent)">ffmpeg.org</a>.
-              </p>
-            </div>
             <button type="submit">Save Configuration</button>
           </form>
         <?php endif; ?>
       </div>
 
-      <!-- Step 4: Build -->
+      <!-- Step 4: Tools -->
       <div class="setup-step">
         <h2>
-          <span class="step-badge <?php echo $ch['build']['ok'] ? 'badge-ok' : 'badge-pending'; ?>"><?php echo $ch['build']['ok'] ? '✓' : '4'; ?></span>
+          <span class="step-badge <?php echo ($ch['ytdlp']['ok'] && $ch['ffmpeg']['ok']) ? 'badge-ok' : 'badge-pending'; ?>"><?php echo ($ch['ytdlp']['ok'] && $ch['ffmpeg']['ok']) ? '✓' : '4'; ?></span>
+          Download Tools
+        </h2>
+        <p>yt-dlp and FFmpeg are required to search YouTube and convert audio to MP3.</p>
+
+        <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:14px">
+          <!-- yt-dlp row -->
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <div style="min-width:180px">
+              <strong>yt-dlp</strong>
+              <?php if ($ch["ytdlp"]["ok"]): ?>
+                &nbsp;<span style="color:var(--success);font-size:.9rem">✓ <?php echo h($ch["ytdlp"]["detail"]); ?></span>
+              <?php else: ?>
+                &nbsp;<span style="color:var(--danger);font-size:.9rem">✗ not found</span>
+              <?php endif; ?>
+            </div>
+            <?php if (!$ch["ytdlp"]["inBin"]): ?>
+              <form method="post" style="margin:0" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Downloading…'">
+                <input type="hidden" name="action" value="setup_download_ytdlp">
+                <button type="submit">Download yt-dlp <small style="opacity:.7">(~20 MB)</small></button>
+              </form>
+            <?php endif; ?>
+          </div>
+
+          <!-- ffmpeg row -->
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <div style="min-width:180px">
+              <strong>FFmpeg</strong>
+              <?php if ($ch["ffmpeg"]["ok"]): ?>
+                &nbsp;<span style="color:var(--success);font-size:.9rem">✓ <?php echo h($ch["ffmpeg"]["detail"]); ?></span>
+              <?php else: ?>
+                &nbsp;<span style="color:var(--danger);font-size:.9rem">✗ not found</span>
+              <?php endif; ?>
+            </div>
+            <?php if (!$ch["ffmpeg"]["inBin"]): ?>
+              <form method="post" style="margin:0" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Downloading… (may take a minute)'">
+                <input type="hidden" name="action" value="setup_download_ffmpeg">
+                <button type="submit">Download FFmpeg <small style="opacity:.7">(~80 MB)</small></button>
+              </form>
+            <?php endif; ?>
+          </div>
+        </div>
+
+        <details style="margin-top:6px">
+          <summary style="cursor:pointer;font-size:.88rem;color:var(--muted);user-select:none">Advanced: use tools already installed elsewhere</summary>
+          <div style="margin-top:10px">
+            <p class="hint" style="margin-bottom:10px">
+              If you already have yt-dlp and FFmpeg installed, enter their paths here instead.
+              Leave blank to use the downloaded copies in <code>bin/</code>.
+            </p>
+            <?php $ev2 = $ch["env"]["values"] ?? []; ?>
+            <form method="post">
+              <input type="hidden" name="action" value="setup_save_tool_paths">
+              <div class="field-row">
+                <label for="s_yt">yt-dlp Path</label>
+                <input id="s_yt" name="ytdlp_path" value="<?php echo h($ev2['YT_DLP_PATH'] ?? ''); ?>" placeholder="C:\ytdlp\  (leave blank to use bin/)">
+              </div>
+              <div class="field-row">
+                <label for="s_ff">FFmpeg Path</label>
+                <input id="s_ff" name="ffmpeg_path" value="<?php echo h($ev2['FFMPEG_PATH'] ?? ''); ?>" placeholder="C:\ffmpeg\bin\  (leave blank to use bin/)">
+              </div>
+              <button type="submit">Save Custom Paths</button>
+            </form>
+          </div>
+        </details>
+      </div>
+
+      <!-- Step 5: Build -->
+      <div class="setup-step">
+        <h2>
+          <span class="step-badge <?php echo $ch['build']['ok'] ? 'badge-ok' : 'badge-pending'; ?>"><?php echo $ch['build']['ok'] ? '✓' : '5'; ?></span>
           Build Project
         </h2>
         <?php if ($ch["build"]["ok"]): ?>
@@ -966,10 +1127,10 @@ if (is_dir($downloadsDir)) {
         <?php endif; ?>
       </div>
 
-      <!-- Step 5: Legal consent -->
+      <!-- Step 6: Legal consent -->
       <div class="setup-step">
         <h2>
-          <span class="step-badge <?php echo $ch['consent']['ok'] ? 'badge-ok' : 'badge-pending'; ?>"><?php echo $ch['consent']['ok'] ? '✓' : '5'; ?></span>
+          <span class="step-badge <?php echo $ch['consent']['ok'] ? 'badge-ok' : 'badge-pending'; ?>"><?php echo $ch['consent']['ok'] ? '✓' : '6'; ?></span>
           Legal Consent
         </h2>
         <?php if ($ch["consent"]["ok"]): ?>
@@ -995,7 +1156,7 @@ if (is_dir($downloadsDir)) {
       <div class="ready-banner">
         <h2>Setup Complete!</h2>
         <?php if ($toolsWarning): ?>
-          <p>yt-dlp or FFmpeg path may not be correct &mdash; downloads might fail. You can fix this in the <code>.env</code> file.</p>
+          <p>yt-dlp or FFmpeg not found &mdash; use the <strong>Download Tools</strong> step above before downloading music.</p>
         <?php else: ?>
           <p>Everything looks good. Refresh the page to start using Musicer.</p>
         <?php endif; ?>
