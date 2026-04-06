@@ -2,6 +2,16 @@
 
 Musicer is a self-hosted web app that downloads music from TIDAL playlists and albums via YouTube as MP3s with full ID3 metadata — cover art, track numbers, disc numbers, year, and album artist embedded. Designed for Jellyfin-compatible local libraries.
 
+## Demo
+
+**Artist search → browse albums → download:**
+
+![Artist search and album download](media/artist-ex.gif)
+
+**Album download with live progress:**
+
+![Album download progress](media/album-ex.gif)
+
 ## Legal Notice
 
 This project is intended for personal-use scenarios only.
