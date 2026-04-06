@@ -9,6 +9,8 @@ declare(strict_types=1);
  * Intended for local use only (XAMPP localhost).
  */
 
+require_once __DIR__ . '/version.php';
+
 $resultOutput = "";
 $resultExitCode = null;
 $resultCommand = "";
@@ -675,6 +677,10 @@ if (is_dir($downloadsDir)) {
     .stat-err { background: var(--stat-err-bg); }
 
     .footnote { margin-top: 16px; color: var(--muted); font-size: .86rem; }
+    .version-row { display:flex; align-items:center; gap:10px; margin-top:6px; }
+    .version-tag { font-size:.78rem; color:var(--muted); background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:2px 8px; }
+    .version-link { font-size:.78rem; color:var(--accent); text-decoration:none; }
+    .version-link:hover { text-decoration:underline; }
     .loading { display: none; } form.submitting .loading { display: inline; }
     form.submitting button[type=submit] { opacity: .6; pointer-events: none; }
 
@@ -1006,6 +1012,7 @@ if (is_dir($downloadsDir)) {
     <section class="hero">
       <h1>Musicer</h1>
       <p>Download TIDAL playlists as tagged MP3 files. Paste a playlist link, hit download, then grab your files below.</p>
+      <div class="version-row"><span class="version-tag">v<?php echo htmlspecialchars($version); ?></span> <a href="update.php" class="version-link">Check for Updates</a></div>
       <div class="theme-toggle" id="themeToggle">
         <button data-theme="auto" title="Auto (system)">Auto</button>
         <button data-theme="light" title="Light mode">Light</button>
