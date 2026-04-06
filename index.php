@@ -277,6 +277,109 @@ if (isset($_GET["zip"])) {
     exit;
 }
 
+// ── Polling-based progress: start job ──────────────────────────────
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_SERVER["HTTP_X_STREAM"]) && !$setup["needsSetup"]) {
+    $action = $_POST["action"] ?? "";
+    $input = trim((string) ($_POST["input"] ?? ""));
+
+    if ($input === "" || !in_array($action, ["download", "album"], true)) {
+        header("Content-Type: application/json");
+        echo json_encode(["error" => "Invalid request."]);
+        exit;
+    }
+
+    // Create a unique job ID and temp files
+    $jobId = bin2hex(random_bytes(8));
+    $tmpDir = sys_get_temp_dir();
+    $outFile = $tmpDir . DIRECTORY_SEPARATOR . "musicer_job_" . $jobId . ".log";
+
+    // Touch output file so polling can start
+    file_put_contents($outFile, "");
+
+    // Build a temporary batch file to run the command in background
+    $nodeCmd = 'node dist\\cli\\index.js ' . $action . ' ' . escapeshellarg($input);
+    $batFile = $tmpDir . DIRECTORY_SEPARATOR . "musicer_job_" . $jobId . ".bat";
+    $batContent  = "@echo off\r\n";
+    $batContent .= 'cd /d "' . __DIR__ . '"' . "\r\n";
+    $batContent .= $nodeCmd . ' > "' . $outFile . '" 2>&1' . "\r\n";
+    $batContent .= 'if %ERRORLEVEL% == 0 (echo __DONE_0__ >> "' . $outFile . '") else (echo __DONE_1__ >> "' . $outFile . '")' . "\r\n";
+    $batContent .= 'del "' . $batFile . '"' . "\r\n";
+    file_put_contents($batFile, $batContent);
+
+    // start /b "" "file" — empty quotes for window title
+    pclose(popen('start /b "" "' . $batFile . '"', 'r'));
+
+    header("Content-Type: application/json");
+    echo json_encode(["jobId" => $jobId]);
+    exit;
+}
+
+// ── Polling-based progress: poll for events ────────────────────────
+if ($_SERVER["REQUEST_METHOD"] === "GET" && isset($_GET["poll"]) && !$setup["needsSetup"]) {
+    $jobId = preg_replace('/[^a-f0-9]/', '', $_GET["poll"]);
+    $cursor = max(0, (int) ($_GET["cursor"] ?? 0));
+
+    $tmpDir = sys_get_temp_dir();
+    $outFile = $tmpDir . DIRECTORY_SEPARATOR . "musicer_job_" . $jobId . ".log";
+
+    if (!file_exists($outFile)) {
+        header("Content-Type: application/json");
+        echo json_encode(["events" => [], "cursor" => 0, "done" => true, "error" => "Job not found"]);
+        exit;
+    }
+
+    $content = file_get_contents($outFile);
+    $newContent = substr($content, $cursor);
+    $newCursor = strlen($content);
+
+    $events = [];
+    $isDone = false;
+    $exitCode = 0;
+
+    if ($newContent !== "" && $newContent !== false) {
+        // Check for done marker
+        if (preg_match('/__DONE_(\d+)__/', $newContent, $dm)) {
+            $isDone = true;
+            $exitCode = (int) $dm[1];
+            $newContent = str_replace($dm[0], '', $newContent);
+        }
+
+        // Extract progress markers
+        while (preg_match('/__PROGRESS__(.+?)__END_PROGRESS__/', $newContent, $m)) {
+            $data = json_decode($m[1], true);
+            if ($data) $events[] = ["type" => "progress", "data" => $data];
+            $newContent = str_replace($m[0], '', $newContent);
+        }
+
+        // Extract summary markers
+        while (preg_match('/__JSON_SUMMARY__(.+?)__END_JSON__/', $newContent, $m)) {
+            $data = json_decode($m[1], true);
+            if ($data) $events[] = ["type" => "summary", "data" => $data];
+            $newContent = str_replace($m[0], '', $newContent);
+        }
+
+        // Remaining non-empty text as log lines
+        $remaining = trim($newContent);
+        if ($remaining !== "") {
+            foreach (explode("\n", $remaining) as $line) {
+                $line = trim($line);
+                if ($line !== "") $events[] = ["type" => "log", "data" => $line];
+            }
+        }
+    }
+
+    if ($isDone) {
+        $events[] = ["type" => "done", "data" => ["exitCode" => $exitCode]];
+        // Clean up temp file after a short delay (client will get this response)
+        @unlink($outFile);
+    }
+
+    header("Content-Type: application/json");
+    header("Cache-Control: no-cache");
+    echo json_encode(["events" => $events, "cursor" => $newCursor, "done" => $isDone]);
+    exit;
+}
+
 // ── Handle POST actions (only when setup is complete) ──────────────
 if ($_SERVER["REQUEST_METHOD"] === "POST" && !$setup["needsSetup"]) {
     $action = $_POST["action"] ?? "";
@@ -363,9 +466,12 @@ if (is_dir($downloadsDir)) {
                 "name" => $entry,
                 "count" => count($mp3s),
                 "files" => array_map("basename", $mp3s),
+                "mtime" => filemtime($full),
             ];
         }
     }
+    // Sort newest first
+    usort($existingPlaylists, function($a, $b) { return $b["mtime"] - $a["mtime"]; });
 }
 ?>
 <!doctype html>
@@ -657,6 +763,77 @@ if (is_dir($downloadsDir)) {
     }
     .ready-banner h2 { margin: 0 0 6px 0; color: var(--ok); }
     .ready-banner p { margin: 0 0 12px 0; color: var(--muted); font-size: .92rem; }
+
+    /* ── Progress Modal ── */
+    .progress-overlay {
+      display: none; position: fixed; inset: 0; z-index: 1000;
+      background: rgba(0,0,0,.55); backdrop-filter: blur(4px);
+      align-items: center; justify-content: center;
+    }
+    .progress-overlay.active { display: flex; }
+    .progress-modal {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 18px; padding: 24px; width: 94%; max-width: 640px;
+      max-height: 85vh; display: flex; flex-direction: column;
+      box-shadow: 0 20px 60px rgba(0,0,0,.3);
+    }
+    .progress-header { margin: 0 0 4px 0; font-size: 1.15rem; }
+    .progress-sub { color: var(--muted); font-size: .88rem; margin: 0 0 14px 0; }
+    .progress-bar-wrap {
+      background: var(--border); border-radius: 8px; height: 10px;
+      overflow: hidden; margin-bottom: 6px;
+    }
+    .progress-bar {
+      height: 100%; background: var(--accent); border-radius: 8px;
+      width: 0%; transition: width .3s ease;
+    }
+    .progress-pct { font-size: .82rem; color: var(--muted); margin: 0 0 14px 0; text-align: right; }
+    .progress-current {
+      padding: 10px 14px; border-radius: 10px; margin-bottom: 12px;
+      background: var(--input-bg); border: 1px solid var(--border);
+      font-size: .92rem; min-height: 42px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .progress-current .spinner {
+      width: 16px; height: 16px; border: 2px solid var(--border);
+      border-top-color: var(--accent); border-radius: 50%;
+      animation: spin .7s linear infinite; flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .progress-tracks {
+      flex: 1; overflow-y: auto; margin-bottom: 12px;
+      max-height: 300px; border: 1px solid var(--border); border-radius: 10px;
+    }
+    .progress-tracks ul { list-style: none; padding: 0; margin: 0; }
+    .progress-tracks li {
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 12px; font-size: .88rem; border-bottom: 1px solid var(--border);
+    }
+    .progress-tracks li:last-child { border-bottom: none; }
+    .progress-tracks .t-icon { width: 18px; text-align: center; flex-shrink: 0; font-size: .85rem; }
+    .progress-tracks .t-icon.ok { color: var(--ok); }
+    .progress-tracks .t-icon.fail { color: var(--danger); }
+    .progress-tracks .t-icon.skip { color: var(--muted); }
+    .progress-tracks .t-icon.wait { color: var(--border); }
+    .progress-tracks .t-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .progress-tracks .t-status { font-size: .8rem; color: var(--muted); flex-shrink: 0; }
+    .progress-log {
+      margin-top: auto;
+    }
+    .progress-log summary {
+      cursor: pointer; font-size: .84rem; color: var(--muted);
+      user-select: none; padding: 4px 0;
+    }
+    .progress-log pre {
+      background: var(--result-bg); color: var(--result-text); padding: 10px;
+      border-radius: 8px; max-height: 160px; overflow-y: auto;
+      font-size: .82rem; white-space: pre-wrap; word-break: break-word;
+      margin: 6px 0 0 0;
+    }
+    .progress-actions { margin-top: 12px; display: flex; gap: 8px; justify-content: flex-end; }
+    .progress-actions button { min-width: 100px; }
+    .progress-actions .btn-muted { background: var(--border); color: var(--ink); }
+    .progress-actions .btn-muted:hover { background: var(--muted); color: #fff; }
   </style>
 </head>
 <body>
@@ -856,21 +1033,21 @@ if (is_dir($downloadsDir)) {
         <button type="submit">Check TIDAL Auth</button>
       </form>
 
-      <form method="post" class="card" style="grid-column: 1 / -1;" onsubmit="this.classList.add('submitting')">
+      <form id="form-download" method="post" class="card" style="grid-column: 1 / -1;">
         <h2>Download Playlist</h2>
         <label for="playlist">TIDAL Playlist URL or ID</label>
         <input id="playlist" name="playlist" placeholder="https://tidal.com/browse/playlist/..." value="<?php echo h($_POST['playlist'] ?? ''); ?>">
         <input type="hidden" name="action" value="download">
-        <button type="submit">Download <span class="loading">&#8987; Working...</span></button>
+        <button type="submit">Download</button>
         <p style="margin:6px 0 0;font-size:.82rem;color:var(--muted)">This can take several minutes for large playlists.</p>
       </form>
 
-      <form method="post" class="card" style="grid-column: 1 / -1;" onsubmit="this.classList.add('submitting')">
+      <form id="form-album" method="post" class="card" style="grid-column: 1 / -1;">
         <h2>Download Album</h2>
         <label for="album">TIDAL Album URL or ID</label>
         <input id="album" name="album" placeholder="https://tidal.com/browse/album/..." value="<?php echo h($_POST['album'] ?? ''); ?>">
         <input type="hidden" name="action" value="album">
-        <button type="submit">Download Album <span class="loading">&#8987; Working...</span></button>
+        <button type="submit">Download Album</button>
         <p style="margin:6px 0 0;font-size:.82rem;color:var(--muted)">Downloads all tracks from the album.</p>
       </form>
 
@@ -1009,7 +1186,34 @@ if (is_dir($downloadsDir)) {
     </p>
 <?php endif; ?>
   </main>
+
+  <!-- ── Progress Modal ── -->
+  <div class="progress-overlay" id="progressOverlay">
+    <div class="progress-modal">
+      <h2 class="progress-header" id="progressTitle">Downloading...</h2>
+      <p class="progress-sub" id="progressSub"></p>
+      <div class="progress-bar-wrap"><div class="progress-bar" id="progressBar"></div></div>
+      <p class="progress-pct" id="progressPct">0 / 0</p>
+      <div class="progress-current" id="progressCurrent">
+        <div class="spinner"></div>
+        <span>Preparing...</span>
+      </div>
+      <div class="progress-tracks" id="progressTracks">
+        <ul id="progressTrackList"></ul>
+      </div>
+      <details class="progress-log">
+        <summary>Raw log</summary>
+        <pre id="progressLogPre"></pre>
+      </details>
+      <div class="progress-actions" id="progressActions" style="display:none;">
+        <button class="btn-muted" onclick="closeProgress()">Close</button>
+        <a id="progressZipLink" class="btn-sm btn-zip" style="display:none;color:#fff;text-decoration:none;padding:10px 14px;border-radius:10px;font-weight:600;">Download All (.zip)</a>
+      </div>
+    </div>
+  </div>
+
   <script>
+    // ── Theme toggle ──
     (function() {
       const root = document.documentElement;
       const btns = document.querySelectorAll('#themeToggle button');
@@ -1019,13 +1223,283 @@ if (is_dir($downloadsDir)) {
         root.removeAttribute('data-theme');
         if (mode === 'dark') root.setAttribute('data-theme', 'dark');
         else if (mode === 'light') root.setAttribute('data-theme', 'light');
-        // 'auto' = no attribute, let @media rule decide
         btns.forEach(b => b.classList.toggle('active', b.dataset.theme === mode));
         localStorage.setItem('musicer-theme', mode);
       }
 
       btns.forEach(b => b.addEventListener('click', () => apply(b.dataset.theme)));
       apply(stored);
+    })();
+
+    // ── Progress streaming ──
+    (function() {
+      const overlay = document.getElementById('progressOverlay');
+      const title = document.getElementById('progressTitle');
+      const sub = document.getElementById('progressSub');
+      const bar = document.getElementById('progressBar');
+      const pct = document.getElementById('progressPct');
+      const current = document.getElementById('progressCurrent');
+      const trackList = document.getElementById('progressTrackList');
+      const logPre = document.getElementById('progressLogPre');
+      const actions = document.getElementById('progressActions');
+      const zipLink = document.getElementById('progressZipLink');
+
+      let totalTracks = 0;
+      let completedTracks = 0;
+      let trackElements = {};
+
+      function esc(s) {
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+      }
+
+      function statusIcon(status) {
+        switch (status) {
+          case 'ok':            return '<span class="t-icon ok">&#10003;</span>';
+          case 'exists':        return '<span class="t-icon ok">&#10003;</span>';
+          case 'no-match':      return '<span class="t-icon skip">&#8212;</span>';
+          case 'download-fail': return '<span class="t-icon fail">&#10007;</span>';
+          case 'tag-fail':      return '<span class="t-icon fail">!</span>';
+          case 'searching':     return '<span class="t-icon"><span class="spinner" style="width:14px;height:14px;display:inline-block;border-width:2px"></span></span>';
+          case 'downloading':   return '<span class="t-icon"><span class="spinner" style="width:14px;height:14px;display:inline-block;border-width:2px;border-top-color:var(--ok)"></span></span>';
+          default:              return '<span class="t-icon wait">&#183;</span>';
+        }
+      }
+
+      function statusLabel(status) {
+        switch (status) {
+          case 'ok':            return 'Done';
+          case 'exists':        return 'Updated';
+          case 'no-match':      return 'No match';
+          case 'download-fail': return 'Failed';
+          case 'tag-fail':      return 'Tag error';
+          case 'searching':     return 'Searching...';
+          case 'downloading':   return 'Downloading...';
+          default:              return '';
+        }
+      }
+
+      function isFinal(status) {
+        return ['ok', 'exists', 'no-match', 'download-fail', 'tag-fail'].includes(status);
+      }
+
+      function updateTrack(idx, trackTitle, artists, status) {
+        const key = idx;
+        const label = (artists || []).join(', ') + ' \u2013 ' + trackTitle;
+
+        if (!trackElements[key]) {
+          const li = document.createElement('li');
+          li.innerHTML = statusIcon(status) +
+            '<span class="t-name">' + esc(label) + '</span>' +
+            '<span class="t-status">' + statusLabel(status) + '</span>';
+          trackList.appendChild(li);
+          trackElements[key] = li;
+        } else {
+          const li = trackElements[key];
+          li.innerHTML = statusIcon(status) +
+            '<span class="t-name">' + esc(label) + '</span>' +
+            '<span class="t-status">' + statusLabel(status) + '</span>';
+        }
+
+        // Auto-scroll track list
+        const container = document.getElementById('progressTracks');
+        container.scrollTop = container.scrollHeight;
+      }
+
+      function updateBar() {
+        if (totalTracks === 0) return;
+        const pctVal = Math.round((completedTracks / totalTracks) * 100);
+        bar.style.width = pctVal + '%';
+        pct.textContent = completedTracks + ' / ' + totalTracks + ' tracks';
+      }
+
+      function showCurrent(text, showSpinner) {
+        current.innerHTML = (showSpinner ? '<div class="spinner"></div>' : '') +
+          '<span>' + esc(text) + '</span>';
+      }
+
+      function appendLog(text) {
+        logPre.textContent += text + '\n';
+        logPre.scrollTop = logPre.scrollHeight;
+      }
+
+      function openProgress(actionLabel) {
+        totalTracks = 0;
+        completedTracks = 0;
+        trackElements = {};
+        trackList.innerHTML = '';
+        logPre.textContent = '';
+        bar.style.width = '0%';
+        pct.textContent = '';
+        actions.style.display = 'none';
+        zipLink.style.display = 'none';
+        title.textContent = actionLabel;
+        sub.textContent = '';
+        showCurrent('Connecting to TIDAL...', true);
+        overlay.classList.add('active');
+      }
+
+      window.closeProgress = function() {
+        overlay.classList.remove('active');
+        // Reload page to refresh library
+        window.location.href = window.location.pathname;
+      };
+
+      async function startStream(action, input, label) {
+        openProgress(label);
+
+        const formData = new FormData();
+        formData.append('action', action);
+        formData.append('input', input);
+
+        let jobId = null;
+
+        try {
+          // Start the background job
+          const startResp = await fetch(window.location.pathname, {
+            method: 'POST',
+            headers: { 'X-Stream': '1' },
+            body: formData,
+          });
+          const startData = await startResp.json();
+          if (startData.error) {
+            showCurrent('Error: ' + startData.error, false);
+            actions.style.display = 'flex';
+            return;
+          }
+          jobId = startData.jobId;
+        } catch (err) {
+          showCurrent('Failed to start: ' + err.message, false);
+          actions.style.display = 'flex';
+          return;
+        }
+
+        // Poll for progress events
+        let cursor = 0;
+        let polling = true;
+
+        async function poll() {
+          try {
+            const resp = await fetch(window.location.pathname + '?poll=' + jobId + '&cursor=' + cursor);
+            const data = await resp.json();
+            cursor = data.cursor;
+
+            for (const event of data.events) {
+              handleProgressEvent(event);
+            }
+
+            if (data.done) {
+              polling = false;
+              return;
+            }
+          } catch (err) {
+            appendLog('Poll error: ' + err.message);
+          }
+
+          if (polling) {
+            setTimeout(poll, 400);
+          }
+        }
+
+        poll();
+      }
+
+      function handleProgressEvent(event) {
+        if (!event || !event.type) return;
+
+        switch (event.type) {
+          case 'progress': {
+            const d = event.data;
+            if (d.phase === 'fetching') {
+              showCurrent(d.message || 'Fetching...', true);
+            } else if (d.phase === 'starting') {
+              totalTracks = d.total || 0;
+              sub.textContent = (d.name || '') + ' \u2014 ' + totalTracks + ' tracks';
+              updateBar();
+              showCurrent('Starting download...', true);
+            } else if (d.phase === 'track') {
+              const idx = d.current;
+              updateTrack(idx, d.title, d.artists, d.status);
+
+              if (isFinal(d.status)) {
+                completedTracks = idx;
+                updateBar();
+                if (d.status === 'ok' || d.status === 'exists') {
+                  showCurrent(d.title + ' \u2014 done', false);
+                } else {
+                  showCurrent(d.title + ' \u2014 ' + statusLabel(d.status), false);
+                }
+              } else {
+                showCurrent(d.title + ' \u2014 ' + statusLabel(d.status), true);
+              }
+            }
+            break;
+          }
+          case 'summary': {
+            const s = event.data;
+            const folder = s.outputDir ? s.outputDir.split(/[\/\\]/).pop() : '';
+            if (folder) {
+              zipLink.href = '?zip=' + encodeURIComponent(folder);
+              zipLink.textContent = 'Download All (.zip)';
+              zipLink.style.display = 'inline-block';
+            }
+            title.textContent = 'Download Complete';
+            showCurrent(
+              s.completed + ' downloaded' +
+              (s.noMatch ? ', ' + s.noMatch + ' no match' : '') +
+              (s.downloadFailed ? ', ' + s.downloadFailed + ' failed' : ''),
+              false
+            );
+            break;
+          }
+          case 'log':
+            appendLog(typeof event.data === 'string' ? event.data : JSON.stringify(event.data));
+            break;
+          case 'done': {
+            actions.style.display = 'flex';
+            const exitCode = event.data ? event.data.exitCode : -1;
+            if (exitCode !== 0) {
+              showCurrent('Process exited with code ' + exitCode, false);
+            }
+            break;
+          }
+        }
+      }
+
+      // Intercept download form
+      const dlForm = document.getElementById('form-download');
+      if (dlForm) {
+        dlForm.addEventListener('submit', function(e) {
+          e.preventDefault();
+          const input = dlForm.querySelector('#playlist').value.trim();
+          if (!input) return;
+          startStream('download', input, 'Downloading Playlist');
+        });
+      }
+
+      // Intercept album form
+      const alForm = document.getElementById('form-album');
+      if (alForm) {
+        alForm.addEventListener('submit', function(e) {
+          e.preventDefault();
+          const input = alForm.querySelector('#album').value.trim();
+          if (!input) return;
+          startStream('album', input, 'Downloading Album');
+        });
+      }
+
+      // Intercept album download buttons from artist search results
+      document.addEventListener('click', function(e) {
+        const btn = e.target.closest('.btn-dl-album');
+        if (!btn) return;
+        const form = btn.closest('form');
+        if (!form) return;
+        const albumId = form.querySelector('input[name="album"]');
+        if (!albumId) return;
+        e.preventDefault();
+        startStream('album', albumId.value, 'Downloading Album');
+      });
     })();
   </script>
 </body>

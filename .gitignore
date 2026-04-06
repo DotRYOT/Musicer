@@ -4,3 +4,4 @@ dist/
 .musicer/
 *.log
 downloads/*
+.github

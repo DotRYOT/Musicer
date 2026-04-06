@@ -11,7 +11,7 @@
     "dev": "tsx src/cli/index.ts",
     "start": "node dist/cli/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "echo \"Tests not added yet\""
+    "test": "node --require tsx/cjs --test src/api/youtube.test.ts src/config/env.test.ts"
   },
   "keywords": [],
   "author": "",

@@ -13,6 +13,10 @@ function sanitize(name: string): string {
   return name.replace(/[<>:"/\\|?*]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
+function emitProgress(data: Record<string, unknown>): void {
+  console.log(`__PROGRESS__${JSON.stringify(data)}__END_PROGRESS__`);
+}
+
 interface TrackResult {
   track: SourceTrack;
   status: "ok" | "no-match" | "download-fail" | "tag-fail";
@@ -34,7 +38,7 @@ export function buildAlbumCommand(): Command {
       const env = getOptionalEnv();
       const outputDir = path.resolve(env.outputDir);
 
-      console.log("Fetching album from TIDAL...");
+      emitProgress({ phase: "fetching", message: "Fetching album from TIDAL..." });
       const data = await getTidalAlbum(album);
 
       console.log(`Album:    ${data.title}`);
@@ -42,6 +46,7 @@ export function buildAlbumCommand(): Command {
       console.log(`Tracks:   ${data.tracks.length}`);
       console.log(`Output:   ${outputDir}`);
       console.log("");
+      emitProgress({ phase: "starting", total: data.tracks.length, name: `${data.artists.join(", ")} - ${data.title}` });
 
       const albumDir = path.join(outputDir, sanitize(`${data.artists.join(", ")} - ${data.title}`));
       if (!opts.dryRun) {
@@ -59,6 +64,7 @@ export function buildAlbumCommand(): Command {
         const filePath = path.join(albumDir, fileName);
 
         process.stdout.write(`${label} ... `);
+        emitProgress({ phase: "track", current: i + 1, total: data.tracks.length, title: track.title, artists: track.artists, status: "searching" });
 
         // If file already exists, skip search + download, just update tags
         const fileExists = !opts.dryRun && fs.existsSync(filePath);
@@ -74,6 +80,7 @@ export function buildAlbumCommand(): Command {
           const best = pickBestCandidate(track, candidates);
           if (!best) {
             console.log("NO MATCH");
+            emitProgress({ phase: "track", current: i + 1, total: data.tracks.length, title: track.title, artists: track.artists, status: "no-match" });
             results.push({ track, status: "no-match" });
             continue;
           }
@@ -84,16 +91,19 @@ export function buildAlbumCommand(): Command {
             continue;
           }
 
+          emitProgress({ phase: "track", current: i + 1, total: data.tracks.length, title: track.title, artists: track.artists, status: "downloading" });
           try {
             await runDownloadJob({ sourceUrl: best.sourceUrl, outputPath: filePath });
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             console.log("DOWNLOAD FAILED");
+            emitProgress({ phase: "track", current: i + 1, total: data.tracks.length, title: track.title, artists: track.artists, status: "download-fail" });
             results.push({ track, status: "download-fail", error: msg });
             continue;
           }
         } else {
           process.stdout.write("EXISTS, updating tags ... ");
+          emitProgress({ phase: "track", current: i + 1, total: data.tracks.length, title: track.title, artists: track.artists, status: "exists" });
         }
 
         if (!opts.skipTags) {
@@ -111,12 +121,14 @@ export function buildAlbumCommand(): Command {
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             console.log("TAG FAILED (file saved)");
+            emitProgress({ phase: "track", current: i + 1, total: data.tracks.length, title: track.title, artists: track.artists, status: "tag-fail" });
             results.push({ track, status: "tag-fail", file: filePath, error: msg });
             continue;
           }
         }
 
         console.log("OK");
+        emitProgress({ phase: "track", current: i + 1, total: data.tracks.length, title: track.title, artists: track.artists, status: "ok" });
         results.push({ track, status: "ok", file: filePath });
       }
 

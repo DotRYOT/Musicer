@@ -1,6 +1,6 @@
-# Musicer (MVP In Progress)
+# Musicer
 
-Musicer is a local CLI to read TIDAL playlists and build a download pipeline toward YouTube source audio with MP3 metadata embedding.
+Musicer is a self-hosted web app that downloads music from TIDAL playlists and albums via YouTube as MP3s with full ID3 metadata — cover art, track numbers, disc numbers, year, and album artist embedded. Designed for Jellyfin-compatible local libraries.
 
 ## Legal Notice
 
@@ -8,23 +8,24 @@ This project is intended for personal-use scenarios only.
 Using it may violate platform Terms of Service and local laws depending on jurisdiction and content rights.
 You are fully responsible for compliance.
 
-## Current Status
+## Features
 
-Phase 1 foundation is implemented:
-- CLI scaffold
-- Consent gate
-- Env/runtime checks
-- TIDAL auth configuration and API ingestion path
-- Download command skeleton
-
-YouTube search, matching scorer, audio download, and metadata writing are next.
+- Download TIDAL playlists and albums as MP3s via yt-dlp + ffmpeg
+- Full ID3 metadata: title, artist, album, album artist, track/disc number, year, embedded cover art
+- YouTube candidate scoring — picks the best match by title, artist, and duration
+- Skip existing files — re-running a download only fetches missing tracks
+- Artist search to browse and download albums
+- Self-hosted PHP web UI with real-time progress modal (file-based polling)
+- Setup wizard, dark mode, library browser, per-album ZIP download
+- Jellyfin-compatible output structure: `downloads/<Album Name>/*.mp3`
 
 ## Prerequisites
 
 - Node.js 20+
-- TIDAL access token, or TIDAL Client ID + Client Secret
-- `yt-dlp` available in PATH
-- `ffmpeg` available in PATH
+- TIDAL Client ID + Client Secret (or a TIDAL access token)
+- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) installed
+- [`ffmpeg`](https://ffmpeg.org/) installed
+- XAMPP (Apache + PHP 8) for the web UI
 
 ## Setup
 
@@ -32,58 +33,50 @@ YouTube search, matching scorer, audio download, and metadata writing are next.
 
 ```powershell
 npm install
-```
-
-2. Create `.env` from `.env.example` and set TIDAL credentials:
-	- Option A: `TIDAL_ACCESS_TOKEN`
-	- Option B: `TIDAL_CLIENT_ID` + `TIDAL_CLIENT_SECRET`
-	- Optional: `TIDAL_COUNTRY_CODE`, `TIDAL_AUTH_BASE_URL`, `TIDAL_API_BASE_URL`
-
-TIDAL note: values shown as Client ID and Client Secret in the TIDAL dashboard are not the same as TIDAL_ACCESS_TOKEN. Musicer can automatically request an access token when client credentials are provided.
-
-Reference: https://developer.tidal.com/documentation/api-sdk/api-sdk-authorization
-
-3. Build:
-
-```powershell
 npm run build
 ```
 
-4. Run checks:
+2. Copy `.env.example` to `.env` and fill in your credentials:
+
+```env
+TIDAL_CLIENT_ID=your_client_id
+TIDAL_CLIENT_SECRET=your_client_secret
+YT_DLP_PATH=C:\ytdlp\yt-dlp.exe
+FFMPEG_PATH=C:\ffmpeg\bin\
+OUTPUT_DIR=./downloads
+```
+
+TIDAL credentials: use Client ID + Client Secret from the [TIDAL developer portal](https://developer.tidal.com/documentation/api-sdk/api-sdk-authorization). Musicer will handle the OAuth token exchange automatically.
+
+3. Verify everything is configured:
 
 ```powershell
 npm run dev -- check
 ```
 
-## Web UI (PHP)
+## Web UI (XAMPP)
 
-If you are using XAMPP, you can run Musicer from your browser:
+1. Start Apache via XAMPP.
+2. Open `http://localhost/Musicer/` — a setup wizard will guide you through first-run configuration.
+3. Use the download forms to start playlist or album downloads with a live progress modal.
 
-1. Start Apache.
-2. Open `http://localhost/Musicer/`.
-3. Use the forms to run:
-	- Environment check
-	- Consent acceptance
-	- Auth status
-	- Playlist download command
+> Keep the web UI local-only. It executes shell commands in the project directory.
 
-Important: this UI executes local shell commands in the project directory. Keep it local-only and do not expose publicly.
-
-## Commands
+## CLI Commands
 
 ```powershell
-npm run dev -- consent
-npm run dev -- consent --accept
-npm run dev -- check
-npm run dev -- auth login
-npm run dev -- auth complete
-npm run dev -- download <tidal-playlist-url-or-id>
+npm run dev -- consent          # Accept the legal disclaimer
+npm run dev -- check            # Verify yt-dlp, ffmpeg, and TIDAL credentials
+npm run dev -- auth             # Test/refresh TIDAL authentication
+npm run dev -- download <id>    # Download a TIDAL playlist by ID or URL
+npm run dev -- album <id>       # Download a TIDAL album by ID or URL
+npm run dev -- artist <query>   # Search TIDAL artists
 ```
 
-## Next Milestones
+## Running Tests
 
-- yt-dlp search integration
-- Track matching score engine
-- MP3 download/conversion pipeline
-- ID3 metadata + cover art embedding
-- Unit/integration tests
+```powershell
+npm test
+```
+
+Tests use Node.js's built-in test runner (`node:test`) with `tsx` for TypeScript support. No additional test framework required.
