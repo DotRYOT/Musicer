@@ -159,7 +159,14 @@ function getSetupStatus(): array
     $checks["build"] = ["ok" => $hasDist, "detail" => $hasDist ? "built" : "not built"];
 
     // 7. Consent accepted
-    $consentFile = (getenv("USERPROFILE") ?: getenv("HOME") ?: $_SERVER["USERPROFILE"] ?? "") . DIRECTORY_SEPARATOR . ".musicer" . DIRECTORY_SEPARATOR . "consent.json";
+    $homeDir = getenv('HOME');
+    if ($homeDir === false || $homeDir === '') {
+        $homeDir = getenv('USERPROFILE');
+    }
+    if ($homeDir === false || $homeDir === '') {
+        $homeDir = $_SERVER['HOME'] ?? ($_SERVER['USERPROFILE'] ?? '');
+    }
+    $consentFile = rtrim($homeDir, '\\/') . DIRECTORY_SEPARATOR . '.musicer' . DIRECTORY_SEPARATOR . 'consent.json';
     $consentOk = false;
     if (file_exists($consentFile)) {
         $data = json_decode(file_get_contents($consentFile), true);
@@ -259,11 +266,41 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST["action"] ?? "") === "setup
 
 if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST["action"] ?? "") === "setup_consent") {
     try {
-        $r = runCommand("npm run dev -- consent --accept 2>&1", __DIR__);
-        if ($r["exitCode"] === 0) {
-            $setupMessage = "Legal consent accepted.";
+        // Accept consent without depending on npm/tsx being available in the
+        // PHP server environment: prefer the compiled CLI via node, and fall
+        // back to writing ~/.musicer/consent.json directly (same file the CLI
+        // and the setup checks read).
+        $homeDir = getenv('HOME');
+        if ($homeDir === false || $homeDir === '') {
+            $homeDir = getenv('USERPROFILE');
+        }
+        if ($homeDir === false || $homeDir === '') {
+            $homeDir = $_SERVER['HOME'] ?? ($_SERVER['USERPROFILE'] ?? getcwd());
+        }
+        $musicerDir = rtrim($homeDir, '\\/') . DIRECTORY_SEPARATOR . '.musicer';
+        $consentFile = $musicerDir . DIRECTORY_SEPARATOR . 'consent.json';
+
+        $ok = false;
+        $distCli = __DIR__ . DIRECTORY_SEPARATOR . 'dist' . DIRECTORY_SEPARATOR . 'cli' . DIRECTORY_SEPARATOR . 'index.js';
+        if (file_exists($distCli)) {
+            $r = runCommand('node ' . escapeshellarg($distCli) . ' consent --accept 2>&1', __DIR__);
+            $ok = $r['exitCode'] === 0;
+        }
+
+        if (!$ok) {
+            if (!is_dir($musicerDir)) {
+                @mkdir($musicerDir, 0755, true);
+            }
+            $ok = file_put_contents(
+                $consentFile,
+                json_encode(['accepted' => true, 'acceptedAt' => date('c')], JSON_PRETTY_PRINT)
+            ) !== false;
+        }
+
+        if ($ok) {
+            $setupMessage = 'Legal consent accepted.';
         } else {
-            $setupError = "Consent command failed: " . substr($r["output"], 0, 500);
+            $setupError = 'Consent could not be saved: ' . htmlspecialchars($consentFile, ENT_QUOTES);
         }
     } catch (Throwable $e) {
         $setupError = $e->getMessage();
@@ -533,6 +570,19 @@ if ($_SERVER["REQUEST_METHOD"] === "GET" && isset($_GET["poll"]) && !$setup["nee
     exit;
 }
 
+// ── CLI command builder ────────────────────────────────────────────
+// Prefer the compiled CLI (node dist/cli/index.js) so the web UI works even
+// when tsx/npm dev dependencies are unavailable in the PHP environment;
+// fall back to `npm run dev -- ...` if the project has not been built.
+function cliCommand(string $args): string
+{
+    $distCli = __DIR__ . DIRECTORY_SEPARATOR . 'dist' . DIRECTORY_SEPARATOR . 'cli' . DIRECTORY_SEPARATOR . 'index.js';
+    if (file_exists($distCli)) {
+        return 'node ' . escapeshellarg($distCli) . ' ' . $args . ' 2>&1';
+    }
+    return 'npm run dev -- ' . $args . ' 2>&1';
+}
+
 // ── Handle POST actions (only when setup is complete) ──────────────
 if ($_SERVER["REQUEST_METHOD"] === "POST" && !$setup["needsSetup"]) {
     $action = $_POST["action"] ?? "";
@@ -545,15 +595,38 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && !$setup["needsSetup"]) {
     try {
         switch ($action) {
             case "check":
-                $command = "npm run dev -- check";
+                $command = cliCommand("check");
                 break;
 
             case "consent_accept":
-                $command = "npm run dev -- consent --accept";
+                // No need to shell out: consent gate is disabled and the file
+                // write below is exactly what the CLI would do.
+                $homeDir = getenv('HOME');
+                if ($homeDir === false || $homeDir === '') {
+                    $homeDir = getenv('USERPROFILE');
+                }
+                if ($homeDir === false || $homeDir === '') {
+                    $homeDir = $_SERVER['HOME'] ?? ($_SERVER['USERPROFILE'] ?? getcwd());
+                }
+                $musicerDir = rtrim($homeDir, '\\/') . DIRECTORY_SEPARATOR . '.musicer';
+                if (!is_dir($musicerDir)) {
+                    @mkdir($musicerDir, 0755, true);
+                }
+                $written = file_put_contents(
+                    $musicerDir . DIRECTORY_SEPARATOR . 'consent.json',
+                    json_encode(['accepted' => true, 'acceptedAt' => date('c')], JSON_PRETTY_PRINT)
+                ) !== false;
+                if (!$written) {
+                    $command = cliCommand('consent --accept');
+                } else {
+                    $resultOutput = "Consent accepted and stored.";
+                    $resultExitCode = 0;
+                    $resultCommand = "(direct write of consent.json)";
+                }
                 break;
 
             case "auth_login":
-                $command = "npm run dev -- auth login";
+                $command = cliCommand("auth login");
                 break;
 
             case "download":
@@ -561,7 +634,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && !$setup["needsSetup"]) {
                     throw new InvalidArgumentException("Playlist URL or ID is required.");
                 }
                 set_time_limit(0);
-                $command = "npm run dev -- download " . escapeshellarg($playlist);
+                $command = cliCommand("download " . escapeshellarg($playlist));
                 break;
 
             case "album":
@@ -569,7 +642,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && !$setup["needsSetup"]) {
                     throw new InvalidArgumentException("Album URL or ID is required.");
                 }
                 set_time_limit(0);
-                $command = "npm run dev -- album " . escapeshellarg($albumInput);
+                $command = cliCommand("album " . escapeshellarg($albumInput));
                 break;
 
             case "artist_search":
@@ -577,17 +650,19 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && !$setup["needsSetup"]) {
                     throw new InvalidArgumentException("Artist name is required.");
                 }
                 set_time_limit(0);
-                $command = "npm run dev -- artist " . escapeshellarg($artistQuery);
+                $command = cliCommand("artist " . escapeshellarg($artistQuery));
                 break;
 
             default:
                 throw new InvalidArgumentException("Unsupported action.");
         }
 
-        $result = runCommand($command, __DIR__);
-        $resultOutput = $result["output"];
-        $resultExitCode = $result["exitCode"];
-        $resultCommand = $command;
+        if ($command !== "") {
+            $result = runCommand($command, __DIR__);
+            $resultOutput = $result["output"];
+            $resultExitCode = $result["exitCode"];
+            $resultCommand = $command;
+        }
 
         // Extract JSON summary from download output
         if (($action === "download" || $action === "album") && preg_match('/__JSON_SUMMARY__(.+?)__END_JSON__/', $resultOutput, $m)) {
