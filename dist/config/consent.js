@@ -10,7 +10,13 @@ exports.assertConsent = assertConsent;
 const node_fs_1 = require("node:fs");
 const node_path_1 = __importDefault(require("node:path"));
 const node_os_1 = __importDefault(require("node:os"));
-const baseDir = node_path_1.default.join(node_os_1.default.homedir(), ".musicer");
+// Consent state lives in ~/.musicer/consent.json by default. Set MUSICER_HOME
+// to override the directory (useful when a web server such as PHP/httpd runs
+// as a different user whose home dir is unset or read-only — e.g. /srv/http
+// on Arch/CachyOS — and needs to share state with the CLI).
+const baseDir = process.env.MUSICER_HOME
+    ? node_path_1.default.resolve(process.env.MUSICER_HOME)
+    : node_path_1.default.join(node_os_1.default.homedir(), ".musicer");
 const consentFile = node_path_1.default.join(baseDir, "consent.json");
 const defaultState = {
     accepted: false,
