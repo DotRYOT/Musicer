@@ -105,18 +105,25 @@ function getSetupStatus(): array
     ];
 
     // 4. yt-dlp reachable
+    $isWindows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
+    $exeSuffix = $isWindows ? '.exe' : '';
     $binDir = __DIR__ . DIRECTORY_SEPARATOR . "bin";
-    $ytdlpBin = $binDir . DIRECTORY_SEPARATOR . "yt-dlp.exe";
+    $ytdlpBin = $binDir . DIRECTORY_SEPARATOR . "yt-dlp" . $exeSuffix;
     $ytdlpPath = $envValues["YT_DLP_PATH"] ?? "";
     $ytdlpOk = false;
     if (file_exists($ytdlpBin)) {
         $ytdlpOk = true;
     } elseif ($ytdlpPath !== "") {
-        $ytdlpExe = rtrim($ytdlpPath, "\\/") . DIRECTORY_SEPARATOR . "yt-dlp.exe";
+        $ytdlpExe = rtrim($ytdlpPath, "\\/") . DIRECTORY_SEPARATOR . "yt-dlp" . $exeSuffix;
         $ytdlpOk = file_exists($ytdlpExe);
         if (!$ytdlpOk) {
-            $ytdlpOk = file_exists($ytdlpPath) && str_ends_with(strtolower($ytdlpPath), "yt-dlp.exe");
+            $ytdlpOk = file_exists($ytdlpPath) && str_ends_with(strtolower($ytdlpPath), "yt-dlp" . $exeSuffix);
         }
+    }
+    if (!$ytdlpOk && !$isWindows) {
+        // Fall back to PATH lookup (pacman/uv/pipx installs on CachyOS/Arch).
+        $r = runCommand("command -v yt-dlp >/dev/null 2>&1 && echo found", __DIR__);
+        $ytdlpOk = $r["exitCode"] === 0 && trim($r["output"]) === "found";
     }
     $checks["ytdlp"] = [
         "ok" => $ytdlpOk,
@@ -125,17 +132,21 @@ function getSetupStatus(): array
     ];
 
     // 5. ffmpeg reachable
-    $ffmpegBin = $binDir . DIRECTORY_SEPARATOR . "ffmpeg.exe";
+    $ffmpegBin = $binDir . DIRECTORY_SEPARATOR . "ffmpeg" . $exeSuffix;
     $ffmpegPath = $envValues["FFMPEG_PATH"] ?? "";
     $ffmpegOk = false;
     if (file_exists($ffmpegBin)) {
         $ffmpegOk = true;
     } elseif ($ffmpegPath !== "") {
-        $ffmpegExe = rtrim($ffmpegPath, "\\/") . DIRECTORY_SEPARATOR . "ffmpeg.exe";
+        $ffmpegExe = rtrim($ffmpegPath, "\\/") . DIRECTORY_SEPARATOR . "ffmpeg" . $exeSuffix;
         $ffmpegOk = file_exists($ffmpegExe);
         if (!$ffmpegOk) {
-            $ffmpegOk = file_exists($ffmpegPath) && str_ends_with(strtolower($ffmpegPath), "ffmpeg.exe");
+            $ffmpegOk = file_exists($ffmpegPath) && str_ends_with(strtolower($ffmpegPath), "ffmpeg" . $exeSuffix);
         }
+    }
+    if (!$ffmpegOk && !$isWindows) {
+        $r = runCommand("command -v ffmpeg >/dev/null 2>&1 && echo found", __DIR__);
+        $ffmpegOk = $r["exitCode"] === 0 && trim($r["output"]) === "found";
     }
     $checks["ffmpeg"] = [
         "ok" => $ffmpegOk,
@@ -264,11 +275,17 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST["action"] ?? "") === "setup
     if (!is_dir($binDir)) {
         mkdir($binDir, 0755, true);
     }
-    $outPath = $binDir . DIRECTORY_SEPARATOR . "yt-dlp.exe";
-    $url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+    $isWindows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
+    $outPath = $binDir . DIRECTORY_SEPARATOR . "yt-dlp" . ($isWindows ? ".exe" : "");
+    $url = $isWindows
+        ? "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+        : "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
     try {
-        $r = runCommand("curl.exe -L --max-time 120 --retry 2 -o \"" . $outPath . "\" \"" . $url . "\" 2>&1", __DIR__);
+        $r = runCommand("curl -L --max-time 120 --retry 2 -o \"" . $outPath . "\" \"" . $url . "\" 2>&1", __DIR__);
         if ($r["exitCode"] === 0 && file_exists($outPath) && filesize($outPath) > 0) {
+            if (!$isWindows) {
+                @chmod($outPath, 0755);
+            }
             $setupMessage = "yt-dlp downloaded successfully.";
         } else {
             $setupError = "Failed to download yt-dlp: " . substr($r["output"], 0, 500);
@@ -283,37 +300,64 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST["action"] ?? "") === "setup
     if (!is_dir($binDir)) {
         mkdir($binDir, 0755, true);
     }
-    $tempZip     = $binDir . DIRECTORY_SEPARATOR . "ffmpeg-temp.zip";
-    $tempExtract = $binDir . DIRECTORY_SEPARATOR . "ffmpeg-extract";
-    $outPath     = $binDir . DIRECTORY_SEPARATOR . "ffmpeg.exe";
-    $url         = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
-    $psLines = [
-        '$ErrorActionPreference = "Stop"',
-        'Write-Host "Downloading FFmpeg..."',
-        'curl.exe -L --max-time 300 --retry 2 -o "' . $tempZip . '" "' . $url . '"',
-        'if ($LASTEXITCODE -ne 0) { throw "curl download failed with exit code $LASTEXITCODE" }',
-        'Write-Host "Extracting..."',
-        'Expand-Archive -Path "' . $tempZip . '" -DestinationPath "' . $tempExtract . '" -Force',
-        '$exe = Get-ChildItem -Path "' . $tempExtract . '" -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1 -ExpandProperty FullName',
-        'if (-not $exe) { throw "ffmpeg.exe not found in archive" }',
-        'Copy-Item $exe -Destination "' . $outPath . '" -Force',
-        'Remove-Item -Recurse -Force "' . $tempExtract . '", "' . $tempZip . '"',
-        'Write-Host "Done."',
-    ];
-    $psScript = implode("\r\n", $psLines);
-    $psFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . "musicer_ffmpeg_" . bin2hex(random_bytes(4)) . ".ps1";
-    file_put_contents($psFile, $psScript);
-    try {
-        $r = runCommand("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" . $psFile . "\" 2>&1", __DIR__);
-        @unlink($psFile);
-        if ($r["exitCode"] === 0 && file_exists($outPath) && filesize($outPath) > 0) {
-            $setupMessage = "FFmpeg downloaded successfully.";
-        } else {
-            $setupError = "Failed to download FFmpeg: " . substr($r["output"], 0, 600);
+    $isWindows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
+
+    if (!$isWindows) {
+        // Linux (CachyOS/Arch): prefer the system package manager.
+        $installCmd = null;
+        if (str_contains(strtolower(shell_exec('cat /etc/os-release 2>/dev/null') ?: ''), 'cachyos') || PHP_OS_FAMILY === 'Linux') {
+            if (@is_executable('/usr/bin/pacman') || trim((string)@shell_exec('command -v pacman')) !== '') {
+                $installCmd = 'sudo pacman -S --noconfirm --needed ffmpeg';
+            }
         }
-    } catch (Throwable $e) {
-        @unlink($psFile);
-        $setupError = $e->getMessage();
+        if ($installCmd === null) {
+            $setupError = "Automatic FFmpeg install is not available on this system. Please install it manually (on CachyOS/Arch: sudo pacman -S ffmpeg).";
+        } else {
+            try {
+                $r = runCommand($installCmd . " 2>&1", __DIR__);
+                $verify = runCommand("command -v ffmpeg >/dev/null 2>&1 && echo found", __DIR__);
+                if ($verify["exitCode"] === 0 && trim($verify["output"]) === "found") {
+                    $setupMessage = "FFmpeg installed via pacman.";
+                } else {
+                    $setupError = "FFmpeg installation did not complete. Try manually: " . $installCmd . "\nOutput: " . substr($r["output"], 0, 600);
+                }
+            } catch (Throwable $e) {
+                $setupError = $e->getMessage();
+            }
+        }
+    } else {
+        $tempZip     = $binDir . DIRECTORY_SEPARATOR . "ffmpeg-temp.zip";
+        $tempExtract = $binDir . DIRECTORY_SEPARATOR . "ffmpeg-extract";
+        $outPath     = $binDir . DIRECTORY_SEPARATOR . "ffmpeg.exe";
+        $url         = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+        $psLines = [
+            '$ErrorActionPreference = "Stop"',
+            'Write-Host "Downloading FFmpeg..."',
+            'curl.exe -L --max-time 300 --retry 2 -o "' . $tempZip . '" "' . $url . '"',
+            'if ($LASTEXITCODE -ne 0) { throw "curl download failed with exit code $LASTEXITCODE" }',
+            'Write-Host "Extracting..."',
+            'Expand-Archive -Path "' . $tempZip . '" -DestinationPath "' . $tempExtract . '" -Force',
+            '$exe = Get-ChildItem -Path "' . $tempExtract . '" -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1 -ExpandProperty FullName',
+            'if (-not $exe) { throw "ffmpeg.exe not found in archive" }',
+            'Copy-Item $exe -Destination "' . $outPath . '" -Force',
+            'Remove-Item -Recurse -Force "' . $tempExtract . '", "' . $tempZip . '"',
+            'Write-Host "Done."',
+        ];
+        $psScript = implode("\r\n", $psLines);
+        $psFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . "musicer_ffmpeg_" . bin2hex(random_bytes(4)) . ".ps1";
+        file_put_contents($psFile, $psScript);
+        try {
+            $r = runCommand("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" . $psFile . "\" 2>&1", __DIR__);
+            @unlink($psFile);
+            if ($r["exitCode"] === 0 && file_exists($outPath) && filesize($outPath) > 0) {
+                $setupMessage = "FFmpeg downloaded successfully.";
+            } else {
+                $setupError = "Failed to download FFmpeg: " . substr($r["output"], 0, 600);
+            }
+        } catch (Throwable $e) {
+            @unlink($psFile);
+            $setupError = $e->getMessage();
+        }
     }
 }
 

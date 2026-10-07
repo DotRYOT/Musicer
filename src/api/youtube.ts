@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, accessSync, constants } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { getOptionalEnv } from "../config/env";
 import { SourceTrack } from "../types";
@@ -11,14 +12,48 @@ export interface YouTubeCandidate {
   sourceUrl: string;
 }
 
-function resolveYtDlp(): string {
+const IS_WINDOWS = process.platform === "win32";
+
+function isExecutableFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Locate yt-dlp across Windows and Linux (CachyOS/Arch).
+export function resolveYtDlp(): string {
   const env = getOptionalEnv();
   if (env.ytDlpPath) {
-    const p = env.ytDlpPath.replace(/[\/]$/, "");
-    return p.endsWith("yt-dlp") || p.endsWith("yt-dlp.exe") ? p : `${p}\\yt-dlp`;
+    const p = env.ytDlpPath.replace(/[\\/]$/, "");
+    if (p.endsWith("yt-dlp") || p.endsWith("yt-dlp.exe")) return p;
+    return join(p, IS_WINDOWS ? "yt-dlp.exe" : "yt-dlp");
   }
-  const binExe = join(process.cwd(), "bin", "yt-dlp.exe");
-  if (existsSync(binExe)) return binExe;
+
+  // Project-local bin/ folder (supports both a bundled .exe and a Linux binary/symlink).
+  const localDir = join(process.cwd(), "bin");
+  for (const name of ["yt-dlp", "yt-dlp.exe"]) {
+    const candidate = join(localDir, name);
+    if (existsSync(candidate)) return candidate;
+  }
+
+  // Common user/system install locations that may not be on PATH.
+  if (!IS_WINDOWS) {
+    const searchDirs = [
+      join(homedir(), ".local", "bin"),
+      "/usr/local/bin",
+      "/usr/bin",
+      "/opt/bin",
+      join(homedir(), ".cargo", "bin"),
+    ];
+    for (const dir of searchDirs) {
+      const candidate = join(dir, "yt-dlp");
+      if (existsSync(candidate) && isExecutableFile(candidate)) return candidate;
+    }
+  }
+
   return "yt-dlp";
 }
 
