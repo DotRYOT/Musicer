@@ -37,11 +37,21 @@ You are fully responsible for compliance.
 - [`ffmpeg`](https://ffmpeg.org/) installed
 - XAMPP (Apache + PHP 8) for the web UI
 
+### Linux (CachyOS / Arch)
+
+Install the runtime dependencies with pacman:
+
+```bash
+sudo pacman -S yt-dlp ffmpeg
+```
+
+The app automatically detects `yt-dlp` and `ffmpeg` from your `PATH` as well as common install locations (`~/.local/bin`, `/usr/local/bin`, `/usr/bin`, `/opt/bin`) — no `.exe` files or `bin/` folder needed on Linux. If you installed via `pipx`/`uv` into a custom location, set `YT_DLP_PATH` / `FFMPEG_PATH` in `.env`.
+
 ## Setup
 
 1. Install dependencies:
 
-```powershell
+```bash
 npm install
 npm run build
 ```
@@ -51,8 +61,11 @@ npm run build
 ```env
 TIDAL_CLIENT_ID=your_client_id
 TIDAL_CLIENT_SECRET=your_client_secret
-YT_DLP_PATH=C:\ytdlp\yt-dlp.exe
-FFMPEG_PATH=C:\ffmpeg\bin\
+# Optional — only needed if yt-dlp/ffmpeg are NOT on your PATH.
+# Linux example:   YT_DLP_PATH=/home/you/.local/bin/yt-dlp
+# Windows example: YT_DLP_PATH=C:\ytdlp\yt-dlp.exe
+#YT_DLP_PATH=
+#FFMPEG_PATH=
 OUTPUT_DIR=./downloads
 ```
 
@@ -60,7 +73,7 @@ TIDAL credentials: use Client ID + Client Secret from the [TIDAL developer porta
 
 3. Verify everything is configured:
 
-```powershell
+```bash
 npm run dev -- check
 ```
 

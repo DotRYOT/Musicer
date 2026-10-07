@@ -19,8 +19,8 @@ export function buildCheckCommand(): Command {
     console.log(`Output dir: ${optional.outputDir}`);
 
     const deps = await getRuntimeDependencyStatus();
-    console.log(`yt-dlp: ${deps.ytDlpAvailable ? "OK" : "MISSING"}`);
-    console.log(`ffmpeg: ${deps.ffmpegAvailable ? "OK" : "MISSING"}`);
+    console.log(`yt-dlp: ${deps.ytDlpAvailable ? "OK" : "MISSING (install with: sudo pacman -S yt-dlp)"}`);
+    console.log(`ffmpeg: ${deps.ffmpegAvailable ? "OK" : "MISSING (install with: sudo pacman -S ffmpeg)"}`);
   });
 
   return cmd;
