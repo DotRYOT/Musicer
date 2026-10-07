@@ -7,7 +7,13 @@ interface ConsentState {
   acceptedAt?: string;
 }
 
-const baseDir = path.join(os.homedir(), ".musicer");
+// Consent state lives in ~/.musicer/consent.json by default. Set MUSICER_HOME
+// to override the directory (useful when a web server such as PHP/httpd runs
+// as a different user whose home dir is unset or read-only — e.g. /srv/http
+// on Arch/CachyOS — and needs to share state with the CLI).
+const baseDir = process.env.MUSICER_HOME
+  ? path.resolve(process.env.MUSICER_HOME)
+  : path.join(os.homedir(), ".musicer");
 const consentFile = path.join(baseDir, "consent.json");
 
 const defaultState: ConsentState = {

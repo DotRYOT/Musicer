@@ -23,6 +23,111 @@ function h(string $value): string
     return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
 }
 
+// ── Consent storage location ───────────────────────────────────────
+// The CLI (src/config/consent.ts) stores consent in path.join(os.homedir(),
+// ".musicer", "consent.json"). Under PHP web servers HOME is often unset or
+// points at a read-only directory (e.g. /srv/http for the http user on
+// Arch/CachyOS), so we mirror Node's homedir() resolution and fall back to a
+// writable project-local ./.musicer directory when the home dir cannot be
+// written to. All consent reads/writes go through these helpers so the web UI
+// and CLI always look at the same file.
+function resolveUserHomeDir(): string
+{
+    if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+        $drive = getenv('HOMEDRIVE');
+        $path = getenv('HOMEPATH');
+        if ($drive !== false && $path !== false && $drive !== '' && $path !== '') {
+            return rtrim($drive . $path, '\\/');
+        }
+        $up = getenv('USERPROFILE');
+        if ($up !== false && $up !== '') {
+            return rtrim($up, '\\/');
+        }
+    } else {
+        // Mirror Node's os.homedir() on POSIX: it uses process.env.HOME first.
+        $home = getenv('HOME');
+        if ($home !== false && $home !== '') {
+            return rtrim($home, '/');
+        }
+    }
+    return rtrim(getcwd() ?: __DIR__, '\\/');
+}
+
+function consentFileCandidates(): array
+{
+    $candidates = [];
+    // Explicit override (useful when serving from multiple users/directories).
+    $envDir = getenv('MUSICER_HOME');
+    if ($envDir !== false && $envDir !== '') {
+        $candidates[] = rtrim($envDir, '\\/') . DIRECTORY_SEPARATOR . 'consent.json';
+    }
+    $home = resolveUserHomeDir();
+    if ($home !== '') {
+        $candidates[] = rtrim($home, '\\/') . DIRECTORY_SEPARATOR . '.musicer' . DIRECTORY_SEPARATOR . 'consent.json';
+    }
+    // Fallback for web servers whose HOME is unset or read-only (e.g. the
+    // http user on Arch/CachyOS serving from /srv/http). Set MUSICER_HOME in
+    // the PHP environment to force a specific location instead.
+    $candidates[] = __DIR__ . DIRECTORY_SEPARATOR . '.musicer' . DIRECTORY_SEPARATOR . 'consent.json';
+
+    // De-duplicate while preserving order.
+    $seen = [];
+    $out = [];
+    foreach ($candidates as $c) {
+        $key = strtolower($c);
+        if (!isset($seen[$key])) {
+            $seen[$key] = true;
+            $out[] = $c;
+        }
+    }
+    return $out;
+}
+
+function getConsentFilePath(): string
+{
+    $candidates = consentFileCandidates();
+    foreach ($candidates as $file) {
+        if (is_file($file)) {
+            return $file;
+        }
+    }
+    return $candidates[0];
+}
+
+function isConsentAccepted(): bool
+{
+    foreach (consentFileCandidates() as $file) {
+        if (is_file($file)) {
+            $data = json_decode((string) file_get_contents($file), true);
+            if (is_array($data) && ($data['accepted'] ?? false) === true) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+function writeConsentFile(): array
+{
+    $payload = json_encode(['accepted' => true, 'acceptedAt' => date('c')], JSON_PRETTY_PRINT);
+    $lastError = '';
+    foreach (consentFileCandidates() as $file) {
+        $dir = dirname($file);
+        if (!is_dir($dir)) {
+            if (!@mkdir($dir, 0775, true) && !is_dir($dir)) {
+                $lastError = 'cannot create directory: ' . $dir;
+                continue;
+            }
+        }
+        if (@file_put_contents($file, $payload) !== false) {
+            @chmod($file, 0664);
+            return ['ok' => true, 'file' => $file];
+        }
+        $lastError = 'cannot write file: ' . $file;
+    }
+    return ['ok' => false, 'error' => $lastError];
+}
+
 function runCommand(string $command, string $cwd): array
 {
     $descriptors = [
@@ -158,21 +263,14 @@ function getSetupStatus(): array
     $hasDist = file_exists($projectDir . DIRECTORY_SEPARATOR . "dist" . DIRECTORY_SEPARATOR . "cli" . DIRECTORY_SEPARATOR . "index.js");
     $checks["build"] = ["ok" => $hasDist, "detail" => $hasDist ? "built" : "not built"];
 
-    // 7. Consent accepted
-    $homeDir = getenv('HOME');
-    if ($homeDir === false || $homeDir === '') {
-        $homeDir = getenv('USERPROFILE');
-    }
-    if ($homeDir === false || $homeDir === '') {
-        $homeDir = $_SERVER['HOME'] ?? ($_SERVER['USERPROFILE'] ?? '');
-    }
-    $consentFile = rtrim($homeDir, '\\/') . DIRECTORY_SEPARATOR . '.musicer' . DIRECTORY_SEPARATOR . 'consent.json';
-    $consentOk = false;
-    if (file_exists($consentFile)) {
-        $data = json_decode(file_get_contents($consentFile), true);
-        $consentOk = ($data["accepted"] ?? false) === true;
-    }
-    $checks["consent"] = ["ok" => $consentOk, "detail" => $consentOk ? "accepted" : "not accepted"];
+    // 7. Consent accepted (check every candidate location: user home and the
+    // project-local fallback, so a CLI run as your user also counts here).
+    $consentOk = isConsentAccepted();
+    $consentFile = getConsentFilePath();
+    $checks["consent"] = [
+        "ok" => $consentOk,
+        "detail" => $consentOk ? "accepted (" . $consentFile . ")" : "not accepted",
+    ];
 
     // Overall: setup needed if node, deps, env (required), build, or consent fail
     $needsSetup = !$checks["node"]["ok"] || !$checks["deps"]["ok"] || !$checks["env"]["ok"]
@@ -268,39 +366,33 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST["action"] ?? "") === "setup
     try {
         // Accept consent without depending on npm/tsx being available in the
         // PHP server environment: prefer the compiled CLI via node, and fall
-        // back to writing ~/.musicer/consent.json directly (same file the CLI
-        // and the setup checks read).
-        $homeDir = getenv('HOME');
-        if ($homeDir === false || $homeDir === '') {
-            $homeDir = getenv('USERPROFILE');
-        }
-        if ($homeDir === false || $homeDir === '') {
-            $homeDir = $_SERVER['HOME'] ?? ($_SERVER['USERPROFILE'] ?? getcwd());
-        }
-        $musicerDir = rtrim($homeDir, '\\/') . DIRECTORY_SEPARATOR . '.musicer';
-        $consentFile = $musicerDir . DIRECTORY_SEPARATOR . 'consent.json';
-
+        // back to writing consent.json directly (checking every candidate
+        // location, including a project-local fallback when the web server's
+        // home directory is not writable).
         $ok = false;
+        $detail = '';
         $distCli = __DIR__ . DIRECTORY_SEPARATOR . 'dist' . DIRECTORY_SEPARATOR . 'cli' . DIRECTORY_SEPARATOR . 'index.js';
         if (file_exists($distCli)) {
             $r = runCommand('node ' . escapeshellarg($distCli) . ' consent --accept 2>&1', __DIR__);
             $ok = $r['exitCode'] === 0;
-        }
-
-        if (!$ok) {
-            if (!is_dir($musicerDir)) {
-                @mkdir($musicerDir, 0755, true);
+            if (!$ok) {
+                $detail = trim((string) $r['output']);
             }
-            $ok = file_put_contents(
-                $consentFile,
-                json_encode(['accepted' => true, 'acceptedAt' => date('c')], JSON_PRETTY_PRINT)
-            ) !== false;
         }
 
-        if ($ok) {
-            $setupMessage = 'Legal consent accepted.';
+        if (!$ok || !isConsentAccepted()) {
+            $w = writeConsentFile();
+            $ok = $w['ok'];
+            if (!$ok) {
+                $detail = $w['error'];
+            }
+        }
+
+        if ($ok && isConsentAccepted()) {
+            $setupMessage = 'Legal consent accepted (' . htmlspecialchars(getConsentFilePath(), ENT_QUOTES) . ').';
         } else {
-            $setupError = 'Consent could not be saved: ' . htmlspecialchars($consentFile, ENT_QUOTES);
+            $setupError = 'Consent could not be saved.'
+                . ($detail !== '' ? ' Detail: ' . htmlspecialchars($detail, ENT_QUOTES) : '');
         }
     } catch (Throwable $e) {
         $setupError = $e->getMessage();
@@ -599,29 +691,16 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && !$setup["needsSetup"]) {
                 break;
 
             case "consent_accept":
-                // No need to shell out: consent gate is disabled and the file
-                // write below is exactly what the CLI would do.
-                $homeDir = getenv('HOME');
-                if ($homeDir === false || $homeDir === '') {
-                    $homeDir = getenv('USERPROFILE');
-                }
-                if ($homeDir === false || $homeDir === '') {
-                    $homeDir = $_SERVER['HOME'] ?? ($_SERVER['USERPROFILE'] ?? getcwd());
-                }
-                $musicerDir = rtrim($homeDir, '\\/') . DIRECTORY_SEPARATOR . '.musicer';
-                if (!is_dir($musicerDir)) {
-                    @mkdir($musicerDir, 0755, true);
-                }
-                $written = file_put_contents(
-                    $musicerDir . DIRECTORY_SEPARATOR . 'consent.json',
-                    json_encode(['accepted' => true, 'acceptedAt' => date('c')], JSON_PRETTY_PRINT)
-                ) !== false;
-                if (!$written) {
-                    $command = cliCommand('consent --accept');
-                } else {
-                    $resultOutput = "Consent accepted and stored.";
+                // Write consent.json via the shared helper, which tries the
+                // user home dir first and falls back to a project-local
+                // ./.musicer dir when the web server cannot write to HOME.
+                $w = writeConsentFile();
+                if ($w['ok']) {
+                    $resultOutput = "Consent accepted and stored at: " . $w['file'];
                     $resultExitCode = 0;
                     $resultCommand = "(direct write of consent.json)";
+                } else {
+                    $command = cliCommand('consent --accept');
                 }
                 break;
 
