@@ -34,9 +34,9 @@ async function acceptConsent() {
     };
     await node_fs_1.promises.writeFile(consentFile, JSON.stringify(nextState, null, 2), "utf8");
 }
+// Consent gate is disabled: downloads proceed without requiring a stored
+// consent acceptance. The `consent` command and consent.json are kept for
+// backward compatibility but no longer block any operation.
 async function assertConsent() {
-    const state = await getConsentState();
-    if (!state.accepted) {
-        throw new Error("Legal consent has not been accepted. Run 'musicer consent --accept' first.");
-    }
+    return;
 }
